@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Tilt Hole</title>
+<meta name="description" content="Tilt Hole — tilt your phone to roll the ball into the glowing target hole and avoid the traps.">
+<meta name="theme-color" content="#eef1f6">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="board"></canvas>
+
+    <div id="hud" class="hidden">
+      <span id="hud-difficulty">Medium</span>
+    </div>
+
+    <section id="screen-start" class="screen">
+      <button id="btn-mute" class="icon-btn" type="button" aria-label="Mute">🔊</button>
+      <h1 class="title">Tilt<span class="dot">•</span>Hole</h1>
+      <p class="subtitle">Tilt your phone to roll the ball into the glowing green hole. Avoid every other hole.</p>
+      <button id="btn-start" class="btn btn-primary" type="button">Start Game</button>
+      <p id="desktop-note" class="hint hidden">Best played on a phone with tilt sensors. No sensors here? Use the arrow keys (or WASD) once the round starts.</p>
+    </section>
+
+    <section id="screen-difficulty" class="screen hidden">
+      <h2 class="title" style="font-size:1.8rem;">Choose Difficulty</h2>
+      <div class="diff-options">
+        <button class="diff-btn" type="button" data-diff="easy">Easy<small>4 holes · big targets · slow roll</small></button>
+        <button class="diff-btn" type="button" data-diff="medium">Medium<small>5 holes · balanced speed</small></button>
+        <button class="diff-btn" type="button" data-diff="hard">Hard<small>7 holes · tight & fast</small></button>
+      </div>
+    </section>
+
+    <section id="screen-permission" class="screen hidden">
+      <h2 class="title" style="font-size:1.6rem;">Motion Access Needed</h2>
+      <p id="permission-error-text" class="hint">Tilt Hole needs access to your device's motion sensors to play.</p>
+      <button id="btn-retry-permission" class="btn btn-primary" type="button">Try Again</button>
+    </section>
+
+    <section id="screen-countdown" class="screen hidden">
+      <p class="subtitle" style="margin-bottom:0;">Get ready</p>
+      <div id="countdown-number">3</div>
+    </section>
+
+    <section id="screen-win" class="screen hidden">
+      <h2 class="title">You Win! 🎉</h2>
+      <p class="subtitle">The ball found its way home.</p>
+      <button id="btn-restart-win" class="btn btn-primary" type="button">Restart</button>
+    </section>
+
+    <section id="screen-gameover" class="screen hidden">
+      <h2 class="title">Game Over</h2>
+      <p class="subtitle">The ball fell into the wrong hole.</p>
+      <button id="btn-restart-lose" class="btn btn-outline" type="button">Restart</button>
+    </section>
+
+    <div id="landscape-warning">Please rotate your phone back to portrait to play Tilt Hole.</div>
+  </div>
+
+  <script src="game.js"></script>
+  <script src="sounds.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
