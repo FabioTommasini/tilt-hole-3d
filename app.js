@@ -1,5 +1,8 @@
 // Tilt Hole — screens, input, rendering, and the game loop.
 // Pure logic (physics, hole placement, collisions) lives in game.js.
+// Rendering is Three.js (WebGL): a tilted top-down camera looking at a
+// flat board, with the ball and holes as real 3D geometry so the scene
+// reads with depth instead of flat 2D shapes.
 (function () {
   'use strict';
 
@@ -8,7 +11,6 @@
   var S = window.TiltHoleSounds;
 
   var canvas = document.getElementById('board');
-  var ctx = canvas.getContext('2d');
 
   var screens = {
     start: document.getElementById('screen-start'),
@@ -57,17 +59,196 @@
   }
 
   // ---------------------------------------------------------------------
-  // Canvas sizing
+  // 3D scene setup
+  //
+  // Board-space pixel coordinates (ball.x/y, hole.x/y — same values the
+  // physics in game.js works in) map straight onto Three.js world units,
+  // with the board centered on the origin: world X = px.x - boardW/2,
+  // world Z = px.y - boardH/2. The board lies flat in the XZ plane; Y is
+  // up. The camera sits above the board's center, tilted back slightly
+  // off vertical, so straight-down top-down play keeps a visible sense
+  // of depth.
+  // ---------------------------------------------------------------------
+  var CAMERA_TILT = 26 * Math.PI / 180; // radians off straight-down
+  var CAMERA_FOV = 42; // degrees, vertical
+
+  function px2x(px) { return px - boardW / 2; }
+  function px2z(py) { return py - boardH / 2; }
+
+  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color('#eef1f6');
+  scene.fog = new THREE.Fog('#eef1f6', 500, 2000);
+
+  var camera = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 1, 6000);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+
+  var sunLight = new THREE.DirectionalLight(0xffffff, 0.85);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.set(1024, 1024);
+  sunLight.shadow.bias = -0.0015;
+  scene.add(sunLight);
+  scene.add(sunLight.target);
+
+  var boardMaterial = new THREE.MeshStandardMaterial({ color: '#eef1f6', roughness: 0.95 });
+  var boardMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), boardMaterial);
+  boardMesh.rotation.x = -Math.PI / 2;
+  boardMesh.receiveShadow = true;
+  scene.add(boardMesh);
+
+  var gridMesh = null; // rebuilt to match board size on resize
+
+  function buildGrid(w, h, step) {
+    if (gridMesh) {
+      scene.remove(gridMesh);
+      gridMesh.geometry.dispose();
+      gridMesh.material.dispose();
+    }
+    var halfW = w / 2, halfH = h / 2, points = [], x, z;
+    for (x = -halfW; x <= halfW + 0.01; x += step) points.push(x, 0.15, -halfH, x, 0.15, halfH);
+    for (z = -halfH; z <= halfH + 0.01; z += step) points.push(-halfW, 0.15, z, halfW, 0.15, z);
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+    var mat = new THREE.LineBasicMaterial({ color: 0x141e32, transparent: true, opacity: 0.06 });
+    gridMesh = new THREE.LineSegments(geo, mat);
+    scene.add(gridMesh);
+  }
+
+  var ballRadius = CONFIG.ball.radius;
+  var ballMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(ballRadius, 24, 16),
+    new THREE.MeshStandardMaterial({ color: '#3a3f4a', roughness: 0.4, metalness: 0.35 })
+  );
+  ballMesh.castShadow = true;
+  scene.add(ballMesh);
+
+  var holesGroup = new THREE.Group();
+  scene.add(holesGroup);
+
+  function disposeMesh(obj) {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (Array.isArray(obj.material)) obj.material.forEach(function (m) { m.dispose(); });
+      else obj.material.dispose();
+    }
+  }
+
+  function buildHoles(holeList) {
+    while (holesGroup.children.length) {
+      disposeMesh(holesGroup.children.pop());
+    }
+    holeList.forEach(function (h) {
+      var x = px2x(h.x), z = px2z(h.y);
+      var isTarget = h.type === 'target';
+      var depth = 16;
+
+      var pit = new THREE.Mesh(
+        new THREE.CylinderGeometry(h.r, h.r * 0.88, depth, 28),
+        new THREE.MeshStandardMaterial({ color: isTarget ? '#0a3d24' : '#111318', roughness: 0.9 })
+      );
+      pit.position.set(x, -depth / 2 + 0.5, z);
+      pit.receiveShadow = true;
+      holesGroup.add(pit);
+
+      var ring = new THREE.Mesh(
+        new THREE.TorusGeometry(h.r * 0.94, Math.max(1.6, h.r * 0.09), 8, 40),
+        new THREE.MeshStandardMaterial({
+          color: isTarget ? '#3ddc84' : '#c0392b',
+          emissive: isTarget ? '#3ddc84' : '#000000',
+          emissiveIntensity: isTarget ? 1.1 : 0,
+          roughness: 0.5
+        })
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(x, 0.6, z);
+      holesGroup.add(ring);
+
+      if (isTarget) {
+        var glow = new THREE.PointLight('#3ddc84', 1.1, h.r * 9, 2);
+        glow.position.set(x, h.r * 1.6, z);
+        holesGroup.add(glow);
+      }
+    });
+  }
+
+  // Frames the whole board inside the camera FOV regardless of aspect
+  // ratio or tilt angle: projects the board's (padded) corners through
+  // the camera and rescales distance from the actual overshoot, which
+  // converges in a couple of iterations to a snug fit. A closed-form
+  // formula would need to account for the near-edge magnification the
+  // tilt introduces; this sidesteps that by just measuring it directly.
+  var fitCorners = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  var NDC_LIMIT = 0.92;
+
+  function fitCamera() {
+    camera.aspect = boardW / boardH;
+
+    var pad = ballRadius * 3;
+    var hw = boardW / 2 + pad, hh = boardH / 2 + pad;
+    fitCorners[0].set(-hw, 0, -hh);
+    fitCorners[1].set(hw, 0, -hh);
+    fitCorners[2].set(-hw, 0, hh);
+    fitCorners[3].set(hw, 0, hh);
+
+    // A camera tilted back off vertical and aimed at the board's exact
+    // center projects the near (bottom) edge larger than the far (top)
+    // edge, so fitting the worst-case corner alone leaves the top of the
+    // frame under-filled. Aiming slightly past center (toward the far
+    // edge) balances the two and uses the frame far more evenly.
+    var lookZ = -hh * 0.22;
+    var distance = Math.max(hw, hh) * 3;
+    for (var iter = 0; iter < 6; iter++) {
+      camera.position.set(0, distance * Math.cos(CAMERA_TILT), distance * Math.sin(CAMERA_TILT) + lookZ);
+      camera.lookAt(0, 0, lookZ);
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
+
+      var maxAbs = 0;
+      for (var i = 0; i < fitCorners.length; i++) {
+        var p = fitCorners[i].clone().project(camera);
+        maxAbs = Math.max(maxAbs, Math.abs(p.x), Math.abs(p.y));
+      }
+      if (Math.abs(maxAbs - NDC_LIMIT) < 0.005) break;
+      distance *= maxAbs / NDC_LIMIT;
+    }
+
+    sunLight.position.set(distance * 0.25, distance * 0.9, distance * 0.4);
+    sunLight.target.position.set(0, 0, 0);
+    sunLight.target.updateMatrixWorld();
+    var shadowSpan = 0.5 * Math.hypot(boardW, boardH) + pad;
+    sunLight.shadow.camera.left = -shadowSpan;
+    sunLight.shadow.camera.right = shadowSpan;
+    sunLight.shadow.camera.top = shadowSpan;
+    sunLight.shadow.camera.bottom = -shadowSpan;
+    sunLight.shadow.camera.near = 1;
+    sunLight.shadow.camera.far = distance * 3;
+    sunLight.shadow.camera.updateProjectionMatrix();
+
+    scene.fog.near = distance * 0.6;
+    scene.fog.far = distance * 2.6;
+  }
+
+  // ---------------------------------------------------------------------
+  // Canvas / renderer sizing
   // ---------------------------------------------------------------------
   function resizeCanvas() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     boardW = window.innerWidth;
     boardH = window.innerHeight;
-    canvas.width = Math.round(boardW * dpr);
-    canvas.height = Math.round(boardH * dpr);
+
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(boardW, boardH, false);
     canvas.style.width = boardW + 'px';
     canvas.style.height = boardH + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    boardMesh.geometry.dispose();
+    boardMesh.geometry = new THREE.PlaneGeometry(boardW, boardH);
+    buildGrid(boardW, boardH, 40);
+    fitCamera();
   }
   window.addEventListener('resize', resizeCanvas);
   window.addEventListener('orientationchange', function () {
@@ -78,73 +259,20 @@
   // ---------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------
-  function drawBoard() {
-    ctx.fillStyle = '#eef1f6';
-    ctx.fillRect(0, 0, boardW, boardH);
-    // subtle grid for depth
-    ctx.strokeStyle = 'rgba(20,30,50,0.045)';
-    ctx.lineWidth = 1;
-    var step = 40;
-    for (var x = 0; x < boardW; x += step) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, boardH); ctx.stroke();
-    }
-    for (var y = 0; y < boardH; y += step) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(boardW, y); ctx.stroke();
+  var rollAxis = new THREE.Vector3();
+
+  function updateBall(dt) {
+    ballMesh.position.set(px2x(ball.x), ballRadius, px2z(ball.y));
+    var speed = Math.hypot(vel.x, vel.y);
+    if (speed > 0.5) {
+      rollAxis.set(vel.y, 0, -vel.x).normalize();
+      ballMesh.rotateOnWorldAxis(rollAxis, (speed * dt) / ballRadius);
     }
   }
 
-  function drawHole(h) {
-    var grad = ctx.createRadialGradient(h.x, h.y, h.r * 0.15, h.x, h.y, h.r);
-    if (h.type === 'target') {
-      grad.addColorStop(0, '#0a3d24');
-      grad.addColorStop(1, '#123');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#3ddc84';
-      ctx.shadowColor = 'rgba(61,220,132,0.85)';
-      ctx.shadowBlur = 14;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-    } else {
-      grad.addColorStop(0, '#111318');
-      grad.addColorStop(1, '#000');
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#c0392b';
-      ctx.stroke();
-    }
-  }
-
-  function drawBall() {
-    ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(ball.x, ball.y + CONFIG.ball.radius * 0.55, CONFIG.ball.radius * 0.9, CONFIG.ball.radius * 0.35, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    ctx.fill();
-    ctx.restore();
-
-    var grad = ctx.createRadialGradient(
-      ball.x - CONFIG.ball.radius * 0.35, ball.y - CONFIG.ball.radius * 0.35, CONFIG.ball.radius * 0.1,
-      ball.x, ball.y, CONFIG.ball.radius
-    );
-    grad.addColorStop(0, '#5a6270');
-    grad.addColorStop(1, '#20232b');
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, CONFIG.ball.radius, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
-
-  function render() {
-    drawBoard();
-    for (var i = 0; i < holes.length; i++) drawHole(holes[i]);
-    drawBall();
+  function render(dt) {
+    updateBall(dt);
+    renderer.render(scene, camera);
   }
 
   // ---------------------------------------------------------------------
@@ -214,6 +342,7 @@
     vel.x = 0; vel.y = 0;
     tilt.x = 0; tilt.y = 0;
     holes = T.generateHoles(boardW, boardH, currentDiff, ball, CONFIG.ball.radius);
+    buildHoles(holes);
     document.getElementById('hud-difficulty').textContent = currentDiff.label;
     hideAllScreens();
     hud.classList.remove('hidden');
@@ -249,12 +378,12 @@
 
     var fallenHole = T.checkHoleCollision(ball, holes, CONFIG.ball.radius);
     if (fallenHole) {
-      render();
+      render(dt);
       endRound(fallenHole.type === 'target');
       return;
     }
 
-    render();
+    render(dt);
     rafId = requestAnimationFrame(loop);
   }
 
