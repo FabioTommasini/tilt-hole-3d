@@ -13,6 +13,22 @@
   var SFX_VOLUME = 0.22;
   var TEMPO_BPM = 132;
 
+  // A ~0.1s silent WAV, played (looped, inaudibly) through a real <audio>
+  // element the moment audio unlocks. iOS Safari otherwise routes
+  // Web-Audio-only sound through its "ambient" audio session category,
+  // which the phone's hardware silent/mute switch silences entirely —
+  // even though the game itself has nothing to do with that switch. A
+  // playing <audio>/<video> element switches the page to the "playback"
+  // category, which ignores the mute switch, and Web Audio output then
+  // follows. This is the standard, widely-documented workaround.
+  var SILENT_UNLOCK_WAV =
+    'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI' +
+    'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI' +
+    'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI' +
+    'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI' +
+    'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI' +
+    'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
+
   var NOTES = {
     R: 0,
     A3: 220.00, B3: 246.94, C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392.00,
@@ -41,6 +57,7 @@
     this.musicTimer = null;
     this.musicLoopId = 0;
     this.ready = false;
+    this._silentEl = null;
   }
 
   SoundManager.prototype._ensureContext = function () {
@@ -68,6 +85,18 @@
     return this.ready;
   };
 
+  SoundManager.prototype._unlockIOSAudioSession = function () {
+    if (this._silentEl || typeof global.Audio !== 'function') return;
+    try {
+      var el = new global.Audio(SILENT_UNLOCK_WAV);
+      el.loop = true;
+      el.setAttribute('playsinline', '');
+      this._silentEl = el;
+      var p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(function () { /* ignore */ });
+    } catch (e) { /* ignore */ }
+  };
+
   // Must be called from inside a user-gesture handler (click/tap) so the
   // browser's autoplay policy allows audio to start.
   SoundManager.prototype.unlock = function () {
@@ -75,6 +104,7 @@
     try {
       if (this.ctx.state === 'suspended') this.ctx.resume();
     } catch (e) { /* ignore */ }
+    this._unlockIOSAudioSession();
   };
 
   SoundManager.prototype.setMuted = function (muted) {

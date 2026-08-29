@@ -153,10 +153,11 @@
   function onDeviceMotion(e) {
     var g = e.accelerationIncludingGravity;
     if (!g || (g.x == null && g.y == null)) return;
-    // Portrait phone: tilting right -> roll right, tilting toward the
-    // player (top edge down) -> roll up on screen.
-    tilt.x = -(g.x || 0);
-    tilt.y = (g.y || 0);
+    // accelerationIncludingGravity points opposite to the direction the
+    // device is tilted toward (it's the reaction force), so the ball
+    // rolls with the tilt when we use these signs directly.
+    tilt.x = (g.x || 0);
+    tilt.y = -(g.y || 0);
   }
 
   function onKeyDown(e) {
